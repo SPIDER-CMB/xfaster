@@ -17,6 +17,8 @@ __all__ = [
     "xfaster_parse",
     "xfaster_submit",
     "xfaster_dump",
+    "xfaster_diff",
+    "xfaster_gcorr",
     "xfaster_main",
     "XFasterJobGroup",
 ]
@@ -1072,6 +1074,7 @@ def xfaster_parse(args=None, test=False):
         ("submit", "submit xfaster job"),
         ("dump", "dump archive from xfaster job to stdout"),
         ("diff", "compare two archive files"),
+        ("gcorr", "iterate over gcorr computation"),
     ]:
         PP = S.add_parser(mode, help=helptext, **parser_opts)
 
@@ -1122,6 +1125,79 @@ def xfaster_parse(args=None, test=False):
                 default=False,
                 action="store_true",
                 help="Print status of all entries",
+            )
+            continue
+
+        if mode == "gcorr":
+            add_arg(
+                PP, "config", positional=True, help="Config file for gcorr computation"
+            )
+            add_arg(
+                PP,
+                "map_tags",
+                short="-t",
+                nargs="+",
+                metavar="TAG",
+                help="Subset of map tags to iterate over",
+            )
+            add_arg(
+                PP,
+                "iternums",
+                short="-i",
+                nargs="+",
+                metavar="N",
+                argtype=int,
+                help="Iteration number to start with for each tag in --map-tags",
+            )
+            add_arg(
+                PP,
+                "keep_iters",
+                default=False,
+                action="store_true",
+                help="Store outputs from each iteration in a separate directory",
+            )
+            add_arg(
+                PP,
+                "max_iters",
+                argtype=int,
+                help="Maximum number of iterations to run (run once and exit if 0)",
+            )
+            add_arg(
+                PP,
+                "converge_criteria",
+                short="-c",
+                argtype=float,
+                help="Maximum fractional change in gcorr that indicates convergence and stops iteration",
+            )
+            add_arg(
+                PP,
+                "allow_extreme",
+                default=False,
+                action="store_true",
+                help="Do not clip large gcorr corrections at each iteration (useful if not converging)",
+            )
+            add_arg(
+                PP,
+                "gcorr_fit_hist",
+                default=False,
+                action="store_true",
+                help="Fit bandpower histogram to a lognorm distribution to compute gcorr",
+            )
+            add_arg(
+                PP,
+                "analyze_only",
+                short="-a",
+                default=False,
+                action="store_true",
+                help="Compute and store gcorr files for the current iteration (internal use only)",
+            )
+            add_arg(
+                PP,
+                "submit",
+                short="-s",
+                default=False,
+                action="store_true",
+                help="Submit jobs with dependencies rather than running serially",
             )
             continue
 
@@ -1398,7 +1474,7 @@ def xfaster_parse(args=None, test=False):
             v = v[0]
 
     # test mode
-    if args.mode not in ["submit", "dump", "diff"]:
+    if args.mode not in ["submit", "dump", "diff", "gcorr"]:
         if args.test:
             msg = ",\n".join(
                 "{}={!r}".format(k, v) for k, v in sorted(vars(args).items())
@@ -1871,6 +1947,162 @@ def xfaster_diff(file1, file2, keys=None, verbose=False):
     compare(data1, data2)
 
 
+def xfaster_gcorr(
+    config,
+    map_tags=None,
+    iternums=None,
+    keep_iters=False,
+    max_iters=0,
+    converge_criteria=0.01,
+    allow_extreme=False,
+    gcorr_fit_hist=False,
+    analyze_only=False,
+    submit=False,
+):
+    """
+    Iteration driver for computing gcorr factors.
+
+    Arguments
+    ---------
+    config : str
+        The config file for gcorr computation.
+    map_tags : list of str
+        Subset of map tags to iterate over.
+    iternums : list of int
+        Iteration number to start with for each tag in `map_tags`.  If one
+        number is given, use the same index for all tags.  All files for
+        iterations above this number will be removed.  If not supplied,
+        iterations will increment to the next index.
+    keep_iters : bool
+        If True, store outputs from each iteration in a separate directory.
+    max_iters : int
+        Maximum number of iterations to run.  If 0, run once and exit.
+    converge_criteria : float
+        Maximum fractional change in gcorr that indicates convergence and stops
+        iteration.
+    allow_extreme : bool
+        If True, do not clip gcorr corrections that are too large at each
+        iteration.  Try this if iterations are not converging.
+    gcorr_fit_hist : bool
+        If True, fit bandpower histogram to a lognorm distribution to compute gcorr.
+    analyze_only : bool
+        If True, compute and store gcorr files for the current iteration.
+        Typically used internally by the script, and should not be called by the
+        user.
+    submit : bool
+        If True, submit a sequence of jobs with dependencies.  Otherwise, runs
+        serially on the hots.
+    """
+    from . import gcorr_tools as gt
+    from matplotlib import use
+
+    use("agg")
+
+    # load configuration
+    g_cfg = gt.get_gcorr_config(config)
+
+    tags = g_cfg["gcorr_opts"]["map_tags"]
+    if map_tags:
+        tags = [t for t in map_tags if t in tags]
+
+    if iternums:
+        if len(iternums) == 1:
+            iternums = iternums * len(tags)
+        iternums = dict(zip(tags, iternums))
+    else:
+        iternums = {t: None for t in tags}
+    for t in tags:
+        iternums.setdefault(t, None)
+
+    null = g_cfg["gcorr_opts"].get("null", False)
+    nsim = g_cfg["gcorr_opts"]["nsim"]
+    rundir = g_cfg["gcorr_opts"]["output_root"]
+    xf_submit_opts = g_cfg.get("submit_opts", {})
+    submit_opts = xf_submit_opts.copy()
+    submit_opts.pop("num_jobs")
+
+    # sim ensemble options
+    run_opts = dict(
+        data_subset=g_cfg["gcorr_opts"]["data_subset"],
+        data_subset2=g_cfg["gcorr_opts"].get("data_subset2", None),
+        output_root=rundir,
+        null=null,
+        num_sims=nsim,
+        **g_cfg["xfaster_opts"],
+    )
+    if submit:
+        run_opts.update(submit=True, **xf_submit_opts)
+
+    # gcorr analysis options
+    gcorr_opts = dict(
+        output_root=rundir,
+        null=null,
+        num_sims=nsim,
+        gcorr_fit_hist=gcorr_fit_hist,
+        allow_extreme=allow_extreme,
+        keep_iters=keep_iters,
+        converge_criteria=converge_criteria,
+        max_iters=max_iters,
+    )
+
+    if analyze_only:
+        assert len(tags) == 1, "Analyze one tag at a time"
+        if gt.process_gcorr(
+            output_tag=tags[0], iternum=iternums[tags[0]], **gcorr_opts
+        ):
+            raise RuntimeError("Stopping iterations")
+        raise SystemExit
+
+    # build command for this script
+    cmd = ["xfaster", "gcorr", os.path.abspath(config)]
+    for k in [
+        "allow_extreme",
+        "gcorr_fit_hist",
+        "keep_iters",
+    ]:
+        if locals()[k]:
+            cmd += ["--{}".format(k.replace("_", "-"))]
+    for k in ["converge_criteria", "max_iters"]:
+        cmd += ["--{}".format(k.replace("_", "-")), str(locals()[k])]
+
+    if max_iters == 0:
+        max_iters = 1
+
+    # run
+    for tag in tags:
+        # setup for next iteration
+        iternum0 = gt.get_next_iter(
+            output_root=rundir, output_tag=tag, iternum=iternums[tag]
+        )
+        if iternum0 > max_iters:
+            raise ValueError(
+                "Tag {} iteration {} > max {}".format(tag, iternum0, max_iters)
+            )
+        gcorr_job = None
+
+        for iternum in range(iternum0, max_iters):
+            print("Starting {} iteration {}".format(tag, iternum))
+
+            # compute ensemble bandpowers
+            if submit:
+                run_opts["dep_afterok"] = gcorr_job
+            bp_jobs = gt.xfaster_gcorr_once(output_tag=tag, iternum=iternum, **run_opts)
+
+            # compute gcorr
+            if submit:
+                # submit analysis job
+                gcorr_job = bt.batch_sub(
+                    cmd + ["-a", "-t", tag, "-i", str(iternum)],
+                    name="gcorr_{}".format(tag),
+                    workdir=os.path.abspath(os.path.join(rundir, tag, "logs")),
+                    dep_afterok=bp_jobs,
+                    **submit_opts,
+                )
+            else:
+                if gt.process_gcorr(output_tag=tag, iternum=iternum, **gcorr_opts):
+                    break
+
+
 def xfaster_main():
     """
     Main entry point for command-line interface.
@@ -1894,3 +2126,7 @@ def xfaster_main():
     elif mode == "diff":
         # diff archive files
         xfaster_diff(**args)
+
+    elif mode == "gcorr":
+        # run gcorr iteration
+        xfaster_gcorr(**args)

@@ -105,7 +105,7 @@ def get_next_iter(output_root="xfaster_gcal", output_tag=None, iternum=None):
     return iternum
 
 
-def xfaster_gcorr(
+def xfaster_gcorr_once(
     output_root="xfaster_gcal",
     output_tag=None,
     data_subset="full",

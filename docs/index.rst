@@ -20,6 +20,7 @@ More details of the math can be found in :ref:`Algorithm<Algorithm>`, and a deta
   quickstart
   algorithm
   notebooks/XFaster_Tutorial
+  gcorr
   api
 
 Indices and tables

@@ -35,9 +35,17 @@ xfaster_exec
   submits the job to a grid system
 
 spec_tools
--------------
+----------
 .. automodule:: xfaster.spec_tools
   :members:
   :undoc-members:
 
-  More generic functions used by methods in xfaster_class
+  More generic functions used by methods in :py:mod:`~xfaster.xfaster_class`
+
+gcorr_tools
+-----------
+.. automodule:: xfaster.gcorr_tools
+  :members:
+  :undoc-members:
+
+  Tools for iteratively computing corrections to the ``g_ell`` factor
