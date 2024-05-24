@@ -34,6 +34,7 @@ xfaster_opts = {
     "noise_type": "gaussian",
     "mask_type": "rectangle",
     "signal_type": "synfast",
+    "foreground_type": "gaussian",
     "data_root2": None,
     "data_subset2": None,
     # residual fitting
@@ -50,6 +51,7 @@ xfaster_opts = {
     # spectrum
     "ensemble_mean": False,
     "tbeb": True,
+    "fix_fg_transfer": True,
     "converge_criteria": 0.005,
     "iter_max": 200,
     "save_iters": False,

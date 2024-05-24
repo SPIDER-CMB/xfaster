@@ -315,6 +315,9 @@ def load_and_parse(filename, check_version=True):
             ]:
                 data.pop(k, None)
 
+        # In version 1, these parameters referred to ensembles used for
+        # sim_index runs.  In version 2+, these parameters refer to ensembles
+        # used for the foreground component of the covariance model
         if "foreground_type" in data:
             data["foreground_type_sim"] = data.pop("foreground_type")
         if "foreground_root" in data:

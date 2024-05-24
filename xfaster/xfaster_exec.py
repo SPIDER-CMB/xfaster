@@ -66,6 +66,9 @@ def xfaster_run(
     signal_type="synfast",
     signal_subset="*",
     signal_transfer_type=None,
+    foreground_type=None,
+    foreground_subset="*",
+    foreground_transfer_type=None,
     noise_type="stationary",
     noise_subset="*",
     qb_file_sim=None,
@@ -73,9 +76,12 @@ def xfaster_run(
     signal_spec=None,
     signal_transfer_spec=None,
     foreground_spec=None,
+    foreground_transfer_spec=None,
     model_r=None,
     freq_ref=359.7,
     beta_ref=1.54,
+    freq_ref_transfer=None,
+    beta_ref_transfer=None,
     # data options
     data_type="raw",
     template_type=None,
@@ -112,6 +118,7 @@ def xfaster_run(
     return_cls=False,
     qb_only=False,
     fix_bb_transfer=False,
+    fix_fg_transfer=False,
     null_first_cmb=False,
     delta_beta_prior=None,
     like_profiles=False,
@@ -216,14 +223,19 @@ def xfaster_run(
         residuals simultaneously.  If not supplied, this defaults to EEBB for
         polarized maps, or TT for unpolarized maps.
     foreground_fit : bool
-        Include foreground residuals in the estimator.
+        Include foreground bandpowers in the estimator.  If ``foreground_type``
+        is set, uses the foreground model in the appropriate sims directory, and
+        includes a separate transfer function calculation for the foreground
+        components of the covariance.  Otherwise, uses a simple power-law model
+        with the same transfer function as the main signal component.
     beta_fit : bool
         If True, include a fit for ``delta_beta`` in the estimator.  Otherwise,
         only fit for foreground amplitudes.
     bin_width_fg : int or array_like of 6 ints
-        Width of each ell bin for each of the six output foreground spectra
-        (TT, EE, BB, TE, EB, TB).  EE/BB bins should be the same
-        in order to handle mixing correctly.
+        Width of each ell bin for each of the six output foreground spectra (TT,
+        EE, BB, TE, EB, TB).  EE/BB bins should be the same in order to handle
+        mixing correctly.  Ignored if neither ``foreground_fit`` nor
+        ``foreground_type`` is set.
     lmin_fg : int
         Minimum ell to use for defining foreground bins.  If not set, defaults
         to ``lmin``.
@@ -262,6 +274,16 @@ def xfaster_run(
     noise_subset : str
         The subset of the noise sims to include.  Must be a glob-parseable
         string.
+    foreground_type : str
+        The variant of foreground sims to use for the foreground component of
+        the covariance model.  If not supplied, and ``foreground_fit`` is False,
+        no foreground component is included.
+    foreground_subset : str
+        The subset of the foreground sims to include.  Must be a glob-parseable
+        string.
+    foreground_transfer_type : string
+        The variant of foreground sims to use for the transfer function for a
+        foreground component.  If not set, defaults to ``foreground_type``.
     qb_file_sim : str
         If not None, pointer to a bandpowers.npz file in the output directory,
         to correct the noise ensemble by an appropriate set of residual ``qb``
@@ -277,8 +299,15 @@ def xfaster_run(
         directory.
     foreground_spec : string
         The spectrum data file to use for estimating foreground component
-        bandpowers.  If not supplied, use a simple power law model for dust
+        bandpowers.  If not supplied, will search for
+        ``spec_foreground_<foreground_type>.dat`` in the foreground sim
+        directory.  Otherwise, use a simple power law model for dust
         foregrounds.
+    foreground_transfer_spec : string
+        The spectrum data file used to generate foreground sims for computing
+        the foreground transfer function.  If not supplied, will search for
+        ``spec_foreground_<foreground_transfer_type>.dat`` in the foreground
+        transfer sim directory.
     model_r : float
         The ``r`` value to use to compute a spectrum for estimating bandpowers.
         Overrides ``signal_spec``.
@@ -289,6 +318,12 @@ def xfaster_run(
         The spectral index of the dust model. This is a fixed value, with
         an additive deviation from this value fit for in foreground fitting
         mode.
+    freq_ref_transfer : float
+        Reference frequency for the dust model used for computing the foreground
+        transfer function.  Defaults to ``freq_ref`` if not given.
+    beta_ref_transfer : float
+        Reference spectral index for the dust model used for computing the
+        foreground transfer function.  Defaults to ``beta_ref`` if not given.
     data_type : str
         The data type to use
     template_type : str
@@ -409,6 +444,10 @@ def xfaster_run(
     fix_bb_transfer : bool
         If True, after transfer functions have been calculated, impose that the
         BB transfer function is exactly equal to the EE transfer function.
+    fix_fg_transfer : bool
+        If True, the transfer function for the foreground component is fixed to
+        an interpolation of the CMB transfer function onto the foreground
+        binning.
     null_first_cmb : bool
         If True, keep first CMB bandpowers fixed to input shape (qb=1).
     delta_beta_prior : float
@@ -478,8 +517,15 @@ def xfaster_run(
         signal_transfer_type = signal_type
         all_opts["signal_transfer_type"] = signal_transfer_type
 
+    if foreground_transfer_type is None:
+        foreground_transfer_type = foreground_type
+        all_opts["foreground_transfer_type"] = foreground_transfer_type
+
     # make sure sims get rerun correctly
-    if signal_transfer_type == signal_type:
+    if (
+        signal_transfer_type == signal_type
+        and foreground_transfer_type == foreground_type
+    ):
         # if signal types match, then sims are run before computing the
         # transfer function, so need to set the correct checkpoint to rerun
         if checkpoint == "sims":
@@ -639,32 +685,58 @@ def xfaster_run(
         signal_subset=signal_subset,
         noise_type=noise_type,
         noise_subset=noise_subset,
+        foreground_type=foreground_type,
+        foreground_transfer_type=foreground_transfer_type,
+        foreground_subset=foreground_subset,
         qb_file=qb_file_sim,
     )
     config_vars.update(sim_opts, "Simulation Ensemble Options")
     config_vars.remove_option("XFaster General", "qb_file_sim")
     sim_opts.pop("signal_transfer_type")
+    sim_opts.pop("foreground_transfer_type")
     sim_transfer_opts = sim_opts.copy()
     if signal_transfer_type != signal_type:
         sim_transfer_opts["signal_type"] = signal_transfer_type
         sim_transfer_opts.pop("noise_type")
         sim_transfer_opts.pop("noise_subset")
         sim_transfer_opts.pop("qb_file")
+    if foreground_transfer_type != foreground_type:
+        sim_transfer_opts["foreground_type"] = foreground_transfer_type
+        sim_transfer_opts.pop("noise_type", None)
+        sim_transfer_opts.pop("noise_subset", None)
+        sim_transfer_opts.pop("qb_file", None)
+
+    if freq_ref_transfer is None:
+        freq_ref_transfer = freq_ref
+    if beta_ref_transfer is None:
+        beta_ref_transfer = beta_ref
 
     shape_opts = dict(
         filename=signal_spec,
         filename_transfer=signal_transfer_spec,
         filename_fg=foreground_spec,
+        filename_transfer_fg=foreground_transfer_spec,
         r=model_r,
         freq_ref=freq_ref,
         beta_ref=beta_ref,
+        freq_ref_transfer=freq_ref_transfer,
+        beta_ref_transfer=beta_ref_transfer,
     )
     config_vars.update(shape_opts, "Shape Spectrum Options")
     config_vars.remove_option("XFaster General", "signal_spec")
     config_vars.remove_option("XFaster General", "signal_transfer_spec")
     config_vars.remove_option("XFaster General", "foreground_spec")
+    config_vars.remove_option("XFaster General", "foreground_transfer_spec")
     config_vars.remove_option("XFaster General", "model_r")
     shape_opts.pop("filename_transfer")
+    shape_opts.pop("filename_transfer_fg")
+    shape_opts.pop("freq_ref_transfer")
+    shape_opts.pop("beta_ref_transfer")
+    shape_transfer_opts = shape_opts.copy()
+    shape_transfer_opts["filename"] = signal_transfer_spec
+    shape_transfer_opts["filename_fg"] = foreground_transfer_spec
+    shape_transfer_opts["freq_ref"] = freq_ref_transfer
+    shape_transfer_opts["beta_ref"] = beta_ref_transfer
 
     spec_opts = dict(
         multi_map=multi_map,
@@ -672,6 +744,7 @@ def xfaster_run(
         iter_max=iter_max,
         save_iters=save_iters,
         fix_bb_transfer=fix_bb_transfer,
+        fix_fg_transfer=fix_fg_transfer,
         delta_beta_prior=delta_beta_prior,
         cond_noise=cond_noise,
         cond_criteria=cond_criteria,
@@ -688,6 +761,7 @@ def xfaster_run(
     spec_opts.pop("multi_map")
     bandpwr_opts = spec_opts.copy()
     bandpwr_opts.pop("fix_bb_transfer")
+    bandpwr_opts.pop("fix_fg_transfer")
     spec_opts.pop("file_tag")
 
     transfer_opts = spec_opts.copy()
@@ -755,7 +829,7 @@ def xfaster_run(
     X.get_masked_sims(transfer=True, **sim_transfer_opts)
 
     X.log("Loading spectrum shape for transfer function...", "notice")
-    X.get_signal_shape(filename=signal_transfer_spec, transfer=True)
+    X.get_signal_shape(transfer=True, **shape_transfer_opts)
 
     X.log("Computing transfer functions...", "notice")
     X.get_transfer(**transfer_opts)
@@ -1197,6 +1271,9 @@ def xfaster_parse(args=None, test=False):
         add_arg(G, "signal_transfer_type")
         add_arg(G, "noise_type")
         add_arg(G, "noise_subset")
+        add_arg(G, "foreground_type")
+        add_arg(G, "foreground_subset")
+        add_arg(G, "foreground_transfer_type")
         add_arg(G, "qb_file_sim")
 
         # shape spectrum options
@@ -1206,8 +1283,11 @@ def xfaster_parse(args=None, test=False):
         add_arg(E, "model_r")
         add_arg(G, "signal_transfer_spec")
         add_arg(G, "foreground_spec")
+        add_arg(G, "foreground_transfer_spec")
         add_arg(G, "freq_ref", argtype=float)
         add_arg(G, "beta_ref", argtype=float)
+        add_arg(G, "freq_ref_transfer", argtype=float)
+        add_arg(G, "beta_ref_transfer", argtype=float)
 
         # data options
         G = PP.add_argument_group("data options")
@@ -1255,6 +1335,7 @@ def xfaster_parse(args=None, test=False):
         add_arg(G, "return_cls")
         add_arg(G, "qb_only")
         add_arg(G, "fix_bb_transfer")
+        add_arg(G, "fix_fg_transfer")
         add_arg(G, "null_first_cmb")
         add_arg(G, "delta_beta_prior", argtype=float)
         add_arg(G, "like_profiles")
@@ -1519,6 +1600,7 @@ class XFasterJobGroup(object):
                 elif a in [
                     "noise_subset",
                     "signal_subset",
+                    "foreground_subset",
                     "data_subset",
                     "data_subset2",
                 ]:
