@@ -112,6 +112,7 @@ def xfaster_run(
     return_cls=False,
     qb_only=False,
     fix_bb_transfer=False,
+    transfer_matrix_root=None,
     null_first_cmb=False,
     delta_beta_prior=None,
     like_profiles=False,
@@ -409,6 +410,10 @@ def xfaster_run(
     fix_bb_transfer : bool
         If True, after transfer functions have been calculated, impose that the
         BB transfer function is exactly equal to the EE transfer function.
+    transfer_matrix_root : str
+        If set, use the pre-computed ell-by-ell transfer matrix stored in this
+        directory, instead of the standard transfer function computed by the
+        XFaster estimator.
     null_first_cmb : bool
         If True, keep first CMB bandpowers fixed to input shape (qb=1).
     delta_beta_prior : float
@@ -672,6 +677,7 @@ def xfaster_run(
         iter_max=iter_max,
         save_iters=save_iters,
         fix_bb_transfer=fix_bb_transfer,
+        transfer_matrix_root=transfer_matrix_root,
         delta_beta_prior=delta_beta_prior,
         cond_noise=cond_noise,
         cond_criteria=cond_criteria,
@@ -686,6 +692,7 @@ def xfaster_run(
     config_vars.update(spec_opts, "Spectrum Estimation Options")
     config_vars.remove_option("XFaster General", "bandpower_tag")
     spec_opts.pop("multi_map")
+    spec_opts.pop("transfer_matrix_root")
     bandpwr_opts = spec_opts.copy()
     bandpwr_opts.pop("fix_bb_transfer")
     spec_opts.pop("file_tag")
@@ -745,20 +752,25 @@ def xfaster_run(
         gcorr_file=gcorr_file,
     )
 
-    X.log("Computing kernels...", "notice")
-    X.get_kernels(window_lmax=window_lmax)
+    if transfer_matrix_root:
+        X.log("Loading pre-computed transfer matrix...", "notice")
+        X.get_transfer_matrix(file_root=transfer_matrix_root)
 
-    X.log("Computing beam window functions...", "notice")
-    X.get_beams(pixwin=pixwin)
+    else:
+        X.log("Computing kernels...", "notice")
+        X.get_kernels(window_lmax=window_lmax)
 
-    X.log("Computing sim ensemble averages for transfer function...", "notice")
-    X.get_masked_sims(transfer=True, **sim_transfer_opts)
+        X.log("Computing beam window functions...", "notice")
+        X.get_beams(pixwin=pixwin)
 
-    X.log("Loading spectrum shape for transfer function...", "notice")
-    X.get_signal_shape(filename=signal_transfer_spec, transfer=True)
+        X.log("Computing sim ensemble averages for transfer function...", "notice")
+        X.get_masked_sims(transfer=True, **sim_transfer_opts)
 
-    X.log("Computing transfer functions...", "notice")
-    X.get_transfer(**transfer_opts)
+        X.log("Loading spectrum shape for transfer function...", "notice")
+        X.get_signal_shape(filename=signal_transfer_spec, transfer=True)
+
+        X.log("Computing transfer functions...", "notice")
+        X.get_transfer(**transfer_opts)
 
     X.log("Computing sim ensemble averages...", "notice")
     X.get_masked_sims(**sim_opts)
@@ -1255,6 +1267,7 @@ def xfaster_parse(args=None, test=False):
         add_arg(G, "return_cls")
         add_arg(G, "qb_only")
         add_arg(G, "fix_bb_transfer")
+        add_arg(G, "transfer_matrix_root")
         add_arg(G, "null_first_cmb")
         add_arg(G, "delta_beta_prior", argtype=float)
         add_arg(G, "like_profiles")

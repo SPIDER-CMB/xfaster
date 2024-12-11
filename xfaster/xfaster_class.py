@@ -115,6 +115,7 @@ class XFaster(object):
         "sims_transfer",
         "shape_transfer",
         "transfer",
+        "transfer_matrix",
         "sims",
         "beams",
         "data",
@@ -141,6 +142,7 @@ class XFaster(object):
         "sims_transfer": ["transfer"],
         "shape_transfer": ["transfer"],
         "transfer": ["bandpowers"],
+        "transfer_matrix": ["bandpowers"],
         "sims": ["bandpowers"],
         "beams": ["transfer"],
         "data": ["bandpowers"],
@@ -1302,7 +1304,8 @@ class XFaster(object):
             template_type, reference_type.
         bp_opts : bool
             If True, also check the following attributes (in addition to those
-            checked if ``data_opts`` is True): weighted_bins, return_cls.
+            checked if ``data_opts`` is True): weighted_bins, return_cls,
+            transfer_matrix.
 
         Returns
         -------
@@ -1342,6 +1345,8 @@ class XFaster(object):
                 name += ["wbins"]
             if getattr(self, "return_cls", False):
                 name += ["cl"]
+            if hasattr(self, "transfer_matrix"):
+                name += ["xfermat"]
 
         if map_tag is not None:
             name += ["map", map_tag]
@@ -4067,7 +4072,8 @@ class XFaster(object):
     def kernel_precalc(self, map_tag=None, transfer=False):
         """
         Compute the mixing kernels M_ll' = K_ll' * F_l' * B_l'^2.  Called by
-        ``bin_cl_template`` to pre-compute kernel terms.
+        ``bin_cl_template`` to pre-compute kernel terms.  Constructs M_ll'
+        directly from the ``transfer_matrix`` attribute, if present.
 
         Arguments
         ---------
@@ -4103,6 +4109,12 @@ class XFaster(object):
         lk = slice(0, lmax + 1)
         mll = OrderedDict()
 
+        use_transfer_matrix = hasattr(self, "transfer_matrix")
+        if use_transfer_matrix and transfer:
+            raise ValueError(
+                "Transfer matrix cannot be used to compute transfer functions."
+            )
+
         if transfer:
             comps = ["cmb"]
         else:
@@ -4118,11 +4130,21 @@ class XFaster(object):
                 mstag = "{}_mix".format(stag)
                 mll[mstag] = OrderedDict()
 
-            bw = self.beam_windows[spec]
-            if not transfer:
-                tf = self.transfer[stag]
+            if not use_transfer_matrix:
+                bw = self.beam_windows[spec]
+                if not transfer:
+                    tf = self.transfer[stag]
 
             for xname, (m0, m1) in map_pairs.items():
+                # extract transfer matrix terms
+                if use_transfer_matrix:
+                    tm = self.transfer_matrix[xname][spec]
+                    mll[stag][xname] = tm[spec][:, lk]
+                    if spec in ["ee", "bb"]:
+                        spec2 = "bb" if spec == "ee" else "ee"
+                        mll[mstag][xname] = tm[spec2][:, lk]
+                    continue
+
                 # beams
                 fb2 = bw[m0][lk] * bw[m1][lk]
 
@@ -5734,10 +5756,11 @@ class XFaster(object):
             )
 
         if not transfer:
-            out.update(
-                qb_transfer=self.qb_transfer,
-                transfer=self.transfer,
-            )
+            if not hasattr(self, "transfer_matrix"):
+                out.update(
+                    qb_transfer=self.qb_transfer,
+                    transfer=self.transfer,
+                )
             if self.template_type is not None:
                 out.update(template_alpha=self.template_alpha)
 
@@ -6109,6 +6132,99 @@ class XFaster(object):
             raise RuntimeError("Error computing transfer function: {}".format(msg))
 
         return self.transfer
+
+    def get_transfer_matrix(self, file_root=None):
+        """
+        Read in an ell-by-ell transfer matrix, constructed from ratios of
+        `anafast` spectra using an ensemble of simulations.  This matrix should
+        be used in place of the standard XFaster transfer function calculation,
+        and includes masking, filtering and beam effects.
+
+        Arguments
+        ---------
+        file_root : str
+            Directory where the transfer matrix blocks are stored.  Expects
+            column text files with naming pattern:
+            ``<tag1>x<tag2>_<spec_in>_to_<spec_out>_block.dat``
+            Required if the transfer matrix has not already been computed.
+
+        Returns
+        -------
+        transfer_matrix : OrderedDict
+            Dictionary of matrix blocks of shape (lmax + 1, lmax + 1),
+            keyed by map cross (xname), output spectrum, and input spectrum.
+            This dictionary is also cached in the ``transfer_matrix`` attribute.
+
+        Notes
+        -----
+        This function is called at the ``transfer_matrix`` checkpoint, and is
+        meant to be an alternative to the standard ``transfer`` sequence.
+        """
+
+        tm_shape = (
+            self.num_corr * (self.num_spec + 2) * (self.lmax + 1),
+            self.lmax + 1,
+        )
+
+        save_name = "transfer_matrix"
+        save_attrs = ["transfer_matrix_root", "transfer_matrix"]
+        ret = self.load_data(
+            save_name,
+            "transfer_matrix",
+            fields=save_attrs,
+            to_attrs=True,
+            shape=tm_shape,
+            shape_ref="transfer_matrix",
+        )
+
+        if ret is not None:
+            return ret["transfer_matrix"]
+
+        transfer_matrix = OrderedDict()
+        for xname, (tag1, tag2) in self.map_pairs.items():
+            dx = transfer_matrix.setdefault(xname, OrderedDict())
+
+            if tag1 == tag2:
+                ftag = "{}x{}".format(tag1, tag2)
+            else:
+                for t in ["{}x{}".format(tag1, tag2), "{}x{}".format(tag2, tag1)]:
+                    fname = os.path.join(file_root, "{}_*_to_*_block.dat".format(t))
+                    if len(glob.glob(fname)):
+                        ftag = t
+                        break
+                else:
+                    self.warn("Missing transfer matrix for {}".format(xname))
+                    continue
+
+            # file name format string
+            fname = os.path.join(file_root, "{}_{{}}_to_{{}}_block.dat".format(ftag))
+
+            for spec_out in self.specs:
+                dsi = dx.setdefault(spec_out, OrderedDict())
+
+                specs_in = ["ee", "bb"] if spec_out in ["ee", "bb"] else [spec_out]
+                for spec_in in specs_in:
+                    if spec_out in ["tt", "ee", "bb"]:
+                        # auto- => auto-
+                        fname1 = fname.format(spec_in.upper(), spec_out.upper())
+                        mat = np.loadtxt(fname1)
+
+                        # populate matrix up to lmax
+                        dsi[spec_in] = np.zeros((self.lmax + 1, self.lmax + 1))
+                        nx, ny = [min([s, self.lmax + 1]) for s in mat.shape]
+                        dsi[spec_in][:nx, :ny] = mat[:nx, :ny]
+                        del mat
+
+                    else:
+                        # cross1- => cross1-
+                        s1, s2 = [s + s for s in spec_in]
+                        dsi[spec_in] = np.sqrt(np.abs(dx[s1][s1] * dx[s2][s2]))
+
+        self.transfer_matrix_root = file_root
+        self.transfer_matrix = transfer_matrix
+
+        self.save_data(save_name, from_attrs=save_attrs)
+        return transfer_matrix
 
     def get_bandpowers(
         self,
